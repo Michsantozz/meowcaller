@@ -14,12 +14,12 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/purpshell/meowcaller/signaling"
 	"github.com/polymorfa/hypermeow"
 	waBinary "github.com/polymorfa/hypermeow/binary"
 	"github.com/polymorfa/hypermeow/proto/waE2E"
 	"github.com/polymorfa/hypermeow/types"
 	"github.com/polymorfa/hypermeow/types/events"
+	"github.com/purpshell/meowcaller/signaling"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -76,6 +76,13 @@ type engineCall struct {
 
 	// The callee <accept> is deferred until the caller's <mute_v2> arrives.
 	acceptPending bool
+
+	// callgotest: mídia de entrada sobe já na oferta (ver onOffer). Se o mute_v2 ou o
+	// primeiro RTP do chamador chegam antes do Answer, guardamos para o Answer usar.
+	earlyMuteSeen    bool
+	earlyMuteFrom    types.JID
+	earlyMuteCreator types.JID
+	inboundSeen      bool
 }
 
 // newEngine creates the engine for a Client.
@@ -589,6 +596,11 @@ func (e *engine) onOffer(ev *events.CallOffer) {
 		e.c.log.Warn().Err(err).Str("call_id", ev.CallID).Msg("preaccept failed")
 	}
 
+	// callgotest: sobe a mídia já durante o toque. O relay só repassa o áudio do
+	// chamador se a alocação acontecer logo após a oferta; atender depois de ~2 s
+	// deixava a chamada muda. O <accept> continua só no Answer.
+	e.maybeStartMedia(ev.CallID)
+
 	if fn := e.c.incomingCallHandler(); fn != nil {
 		fn(call)
 	}
@@ -683,10 +695,22 @@ func (e *engine) answer(c *Call) error {
 	}
 	e.mu.Lock()
 	m.acceptPending = true
+	muteSeen, from, creator, inbound := m.earlyMuteSeen, m.earlyMuteFrom, m.earlyMuteCreator, m.inboundSeen
 	e.mu.Unlock()
 
 	c.setPhase(CallPhaseConnecting)
 	e.maybeStartMedia(c.id)
+	// callgotest: o mute_v2 já chegou durante o toque; aceita agora.
+	if muteSeen {
+		e.c.log.Info().Str("call_id", c.id).Msg("mute_v2 chegou antes do Answer; enviando accept")
+		e.sendAccept(c.id, from, creator)
+	}
+	if inbound {
+		c.setPhase(CallPhaseActive)
+		if fn := c.onReadyFn(); fn != nil {
+			fn()
+		}
+	}
 	return nil
 }
 
@@ -1091,6 +1115,16 @@ func (e *engine) onCallRaw(callNode *waBinary.Node) bool {
 			if fn := m.call.onMuteStateFn(); fn != nil {
 				fn(muted)
 			}
+		}
+		if !pending && m != nil && m.call != nil && m.call.State() == CallPhaseRinging {
+			e.mu.Lock()
+			if !m.earlyMuteSeen {
+				m.earlyMuteSeen = true
+				m.earlyMuteFrom = callNode.AttrGetter().JID("from")
+				m.earlyMuteCreator = mv.JID("call-creator")
+			}
+			e.mu.Unlock()
+			return false
 		}
 		if !pending {
 			e.c.log.Debug().
@@ -1505,6 +1539,7 @@ type relayEndpoint struct {
 	tokenID     uint32
 	authTokenID uint32
 	isFNA       bool
+	c2rRTT      uint32 // latência medida até o relay; desempata no fallback de entrada
 	addresses   []relayAddress
 }
 
@@ -1644,6 +1679,7 @@ func parseRelayData(node *waBinary.Node) *relayData {
 			tokenID:     attrUint(child, "token_id"),
 			authTokenID: attrUint(child, "auth_token_id"),
 			isFNA:       child.AttrGetter().String("is_fna") == "1",
+			c2rRTT:      attrUint(child, "c2r_rtt"),
 			addresses: []relayAddress{{
 				ipv4: fmt.Sprintf("%d.%d.%d.%d", ab[0], ab[1], ab[2], ab[3]),
 				port: binary.BigEndian.Uint16(ab[4:6]),
@@ -1664,6 +1700,22 @@ func getMediaRelayEndpoint(rd *relayData, inbound bool) *relayEndpoint {
 			if e := &rd.endpoints[i]; e.isFNA {
 				return e
 			}
+		}
+		// callgotest: correção de meowcaller#40. Sem is_fna na oferta, o uplink de
+		// quem liga está num relay que não é nosso (auth_token_id=0); escolhe o de
+		// menor c2r_rtt. Remover quando a #40 for corrigida na biblioteca.
+		var best *relayEndpoint
+		for i := range rd.endpoints {
+			e := &rd.endpoints[i]
+			if e.authTokenID != 0 || e.c2rRTT == 0 {
+				continue
+			}
+			if best == nil || e.c2rRTT < best.c2rRTT {
+				best = e
+			}
+		}
+		if best != nil {
+			return best
 		}
 	}
 	for i := range rd.endpoints {

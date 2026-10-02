@@ -95,7 +95,8 @@ func (e *engine) maybeStartMedia(callID string) {
 	inbound := m.direction == CallDirectionIncoming
 	e.mu.Unlock()
 
-	if call != nil {
+	// callgotest: entrada ainda tocando continua "ringing"; o Answer muda a fase.
+	if call != nil && !(inbound && call.State() == CallPhaseRinging) {
 		call.setPhase(CallPhaseConnecting)
 	}
 	e.c.log.Info().Str("call_id", callID).Msg("starting media")
@@ -1125,7 +1126,13 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		if rtpIn++; rtpIn == 1 {
 			log.Info().Msg("first RTP decoded from relay, inbound audio flowing")
 			e.c.diag.Emit("meta", map[string]any{"event": "first_rtp_in", "call_id": callID})
-			if call != nil {
+			e.mu.Lock()
+			if em := e.calls[callID]; em != nil {
+				em.inboundSeen = true // callgotest: Answer marca ativo se chegou durante o toque
+			}
+			e.mu.Unlock()
+			// callgotest: com a mídia subindo durante o toque, só vira ativa se já atendeu.
+			if call != nil && call.State() == CallPhaseConnecting {
 				call.setPhase(CallPhaseActive)
 				if fn := call.onReadyFn(); fn != nil {
 					fn()
