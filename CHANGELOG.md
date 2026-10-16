@@ -7,6 +7,13 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
 
 ## [Unreleased]
 
+### meowcaller — on-demand video keyframe request — `implemented`
+- Added `Call.RequestVideoKeyframe()`: raises a flag the media loop serves on the next
+  relay packet by sending an authenticated PLI on every received video SSRC, through the
+  same per-SSRC rate limit as loss recovery. Lets a bridge that attaches a new decoder
+  mid-call (e.g. a browser joining) get an IDR instead of waiting for the peer's next
+  periodic keyframe. Returns an error until media is running; unit-tested, live E2E pending.
+
 ### meowcaller — start inbound media on the offer so a late Answer keeps inbound audio
 - The relay only bridged the caller's audio when our allocation followed the offer
   closely; answering a 1:1 call after ~2 s left it with outbound audio only (related

@@ -632,6 +632,21 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	videoReceiveStates := make(map[*participantAudioReceiver]*videoReceiveState)
 	appDataReceivers := make(map[*participantAudioReceiver]*appDataReceiver)
 	lastVideoPLI := make(map[uint32]time.Time)
+	// Call.RequestVideoKeyframe only raises this flag: lastVideoPLI belongs to the
+	// receive loop, which serves the request on the next relay packet.
+	keyframeWanted := new(atomic.Bool)
+	e.mu.Lock()
+	if m := e.calls[callID]; m != nil {
+		m.requestKeyframe = func() { keyframeWanted.Store(true) }
+	}
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		if m := e.calls[callID]; m != nil {
+			m.requestKeyframe = nil
+		}
+		e.mu.Unlock()
+	}()
 	var rosterGeneration uint64
 	hasRosterGeneration := false
 	var videoWirePacket, videoWireFrame uint64
@@ -830,6 +845,20 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			}
 			rosterGeneration = currentRosterGeneration
 			hasRosterGeneration = true
+		}
+		if keyframeWanted.Swap(false) {
+			for receiver := range videoReceiveStates {
+				if !shouldSendVideoPLI(lastVideoPLI, receiver.videoSSRC, time.Now()) {
+					continue
+				}
+				packet, feedbackErr := videoRtcp.pictureLossIndication(receiver.videoSSRC)
+				if feedbackErr == nil {
+					_, feedbackErr = ch.Send(packet)
+				}
+				if feedbackErr != nil {
+					log.Warn().Err(feedbackErr).Uint32("ssrc", receiver.videoSSRC).Msg("failed to send requested video keyframe PLI")
+				}
+			}
 		}
 		relayRx.Add(1)
 		rawPkt := buf[:n]

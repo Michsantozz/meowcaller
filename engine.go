@@ -62,6 +62,7 @@ type engineCall struct {
 	videoTx           *videoSender // video send pipeline, live while media runs
 	appDataTx         *appDataSender
 	rekeyPeer         func(string) error
+	requestKeyframe   func() // asks the media loop to PLI the peer's video; live while media runs
 	group             bool
 	groupUpdate       *groupCallUpdate
 	groupReceivers    *participantReceiveRegistry
@@ -258,6 +259,22 @@ func (e *engine) sendVideoFrame(callID string, au []byte, duration time.Duration
 		return errors.New("meowcaller: call has no active video media")
 	}
 	vs.send(au, duration)
+	return nil
+}
+
+// requestPeerKeyframe asks the media loop to send a PLI for every video stream
+// received so far on the call.
+func (e *engine) requestPeerKeyframe(callID string) error {
+	e.mu.Lock()
+	var request func()
+	if m := e.calls[callID]; m != nil {
+		request = m.requestKeyframe
+	}
+	e.mu.Unlock()
+	if request == nil {
+		return errors.New("meowcaller: call has no active media")
+	}
+	request()
 	return nil
 }
 

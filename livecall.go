@@ -619,6 +619,14 @@ func (c *Call) OnVideoKeyframeRequest(fn func()) {
 	c.mu.Unlock()
 }
 
+// RequestVideoKeyframe asks the peer for a fresh IDR by sending a PLI on every video
+// stream received so far, e.g. when a new decoder starts consuming ReceiveVideo
+// mid-call. Requests are coalesced and rate limited per stream; before any peer
+// video has arrived it does nothing, since the first frame is already an IDR.
+func (c *Call) RequestVideoKeyframe() error {
+	return c.eng.requestPeerKeyframe(c.id)
+}
+
 // OnParticipantVideoFrame registers a callback for authenticated H.264 access
 // units with their group participant identity. It is additive to ReceiveVideo.
 func (c *Call) OnParticipantVideoFrame(fn func(ParticipantVideoFrame)) {
