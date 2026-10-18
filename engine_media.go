@@ -711,6 +711,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 
 	var audioReception rtp.RtcpReceptionStatsSet
 	var videoReception rtp.RtcpReceptionStatsSet
+	var audioPacketsIn atomic.Uint64 // authenticated peer audio packets, for Call.MediaStats
 	if groupMode.Load() {
 		e.mu.Lock()
 		current := e.calls[callID]
@@ -773,9 +774,11 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 					videoReception.Retain(audioReceivers.ActiveVideoSSRCs())
 				}
 				audioReports := audioReception.Reports(nowMs)
+				audioSent := txPipe.SenderStats()
+				call.updateLocalMediaStats(now, audioReports, audioPacketsIn.Load(), audioSent)
 				_, err := sendMediaSrtcpReceptionReports(
 					audioRtcp,
-					txPipe.SenderStats(),
+					audioSent,
 					nowMs,
 					audioReports,
 					groupMode.Load() && audioReceivers.HasCommittedGroupUpdate(),
@@ -906,6 +909,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				nowMs := uint64(time.Now().UnixMilli())
 				audioReception.ObserveSenderReport(reportSsrc, ntpSeconds, ntpFraction, nowMs)
 				videoReception.ObserveSenderReport(reportSsrc, ntpSeconds, ntpFraction, nowMs)
+			}
+			if report, ok := rtp.ParseReceptionReportFor(plain, ssrc); ok {
+				call.updateRemoteMediaStats(time.Now(), report)
 			}
 			e.c.diag.Emit("rtcp", map[string]any{
 				"event": "in", "ssrc": senderSsrc, "index": index,
@@ -1116,6 +1122,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			continue
 		}
 		audioReception.Observe(audio.SSRC, vh.SequenceNumber, audio.Timestamp, uint64(time.Now().UnixMilli()), SampleRate)
+		audioPacketsIn.Add(1)
 		e.c.diag.Emit("rtp", map[string]any{
 			"event": "in", "ssrc": audio.SSRC, "seq": vh.SequenceNumber,
 			"ts": audio.Timestamp, "pt": vh.PayloadType, "marker": vh.Marker,

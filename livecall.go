@@ -46,6 +46,9 @@ type Call struct {
 	handRaises                map[types.JID]bool
 	onScreenShare             func(ScreenShareState)
 	screenShares              map[types.JID]ScreenShareState
+
+	statsMu sync.Mutex
+	stats   MediaStats
 }
 
 // GroupCallState is a sanitized group-call roster. Transaction zero may contain
